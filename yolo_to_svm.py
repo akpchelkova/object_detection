@@ -1,117 +1,73 @@
 import os
 import cv2
 import pandas as pd
-import xml.etree.ElementTree as ET
 from skimage.feature import hog
 
-# Конфигурация путей
-INPUT_IMAGES_DIR = 'images/'      # Папка с исходными изображениями
-RESULTS_DIR = 'results/'          # Папка с XML-файлами разметки
-SVM_INPUT_DIR = 'svm_input/'      # Папка для сохранения CSV
-OUTPUT_CSV = os.path.join(SVM_INPUT_DIR, 'hog_features.csv')
-
-### САША ОТРЕДАЧЬ ПОД РЕАЛЬНЫЕ ПУТИ К ПАПКАМ!!!!!!!!!
-
+# Пути к папкам
+cropped_dir = 'content/cropped/'  # Папка с обрезанными изображениями от YOLO
+output_csv = 'hog_features.csv'
 
 # Параметры HOG
-HOG_PARAMS = {
-    'orientations': 9,
-    'pixels_per_cell': (8, 8),
-    'cells_per_block': (2, 2),
-    'visualize': False
-}
-
-# Создаем папку для выходных данных
-os.makedirs(SVM_INPUT_DIR, exist_ok=True)
+orientations = 9
+pixels_per_cell = (8, 8)
+cells_per_block = (2, 2)
 
 
-def parse_xml_annotation(xml_path):
-    """Парсит XML файл с аннотациями и возвращает список объектов"""
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
+def extract_hog_features(image):
+    """Вычисляет HOG-признаки для всего изображения"""
+    # Преобразуем в grayscale и изменяем размер для стандартизации
+    if len(image.shape) > 2:  # Если цветное изображение
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
 
-    objects = []
-    for obj in root.findall('object'):
-        class_name = obj.find('name').text
-        bbox = obj.find('bndbox')
-        xmin = int(bbox.find('xmin').text)
-        ymin = int(bbox.find('ymin').text)
-        xmax = int(bbox.find('xmax').text)
-        ymax = int(bbox.find('ymax').text)
-        objects.append({
-            'class': class_name,
-            'bbox': (xmin, ymin, xmax, ymax)
-        })
-    return objects
-
-
-def extract_hog_features(image, bbox):
-    """Извлекает HOG-признаки для области изображения"""
-    xmin, ymin, xmax, ymax = bbox
-    roi = image[ymin:ymax, xmin:xmax]
-
-    # Пропускаем пустые области
-    if roi.size == 0:
-        return None
-
-    # Конвертируем в grayscale и ресайзим
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    resized = cv2.resize(gray, (64, 64))
+    resized = cv2.resize(gray, (64, 64))  # Стандартный размер для HOG
 
     # Вычисляем HOG-признаки
-    features = hog(resized, **HOG_PARAMS)
+    features = hog(resized,
+                   orientations=orientations,
+                   pixels_per_cell=pixels_per_cell,
+                   cells_per_block=cells_per_block,
+                   visualize=False)
+
     return features
 
 
-# Собираем все данные
-all_data = []
-
-# Обрабатываем каждый XML файл в папке results
-for xml_file in os.listdir(RESULTS_DIR):
-    if not xml_file.endswith('.xml'):
-        continue
-
-    # Получаем имя соответствующего изображения
-    xml_path = os.path.join(RESULTS_DIR, xml_file)
-    image_name = ET.parse(xml_path).getroot().find('filename').text
-    image_path = os.path.join(INPUT_IMAGES_DIR, image_name)
-
-    if not os.path.exists(image_path):
-        print(f"Изображение {image_name} не найдено, пропускаем")
+# Собираем данные
+data = []
+for image_file in os.listdir(cropped_dir):
+    if not image_file.lower().endswith(('.png', '.jpg', '.jpeg')):
         continue
 
     # Загружаем изображение
+    image_path = os.path.join(cropped_dir, image_file)
     image = cv2.imread(image_path)
     if image is None:
-        print(f"Ошибка загрузки изображения {image_name}, пропускаем")
+        print(f"Ошибка загрузки изображения: {image_file}")
         continue
 
-    # Парсим XML с аннотациями
-    objects = parse_xml_annotation(xml_path)
+    # Извлекаем HOG-признаки для всего изображения
+    features = extract_hog_features(image)
+    if features is not None:
+        # Пример: если имя файла "test_0.jpg", то исходное было "test.jpg"
+        original_name = '_'.join(image_file.split('_')[:-1]) + '.jpg'
 
-    if not objects:
-        print(f"Не найдены объекты в файле {xml_file}, пропускаем")
-        continue
+        # Добавляем признаки и название исходного файла
+        row = list(features) + [original_name, image_file]
+        data.append(row)
 
-    # Обрабатываем каждый объект
-    for obj in objects:
-        features = extract_hog_features(image, obj['bbox'])
-        if features is not None:
-            # Добавляем признаки, класс и имя изображения
-            row = list(features) + [obj['class'], image_name]
-            all_data.append(row)
+# Создаем DataFrame
+if data:
+    # Создаем заголовки для признаков
+    num_features = len(data[0]) - 2  # -2 потому что последние два элемента - имена файлов
+    feature_columns = [f'hog_{i}' for i in range(num_features)]
+    columns = feature_columns + ['original_image', 'cropped_image']
 
-# Сохраняем результаты в CSV
-if all_data:
-    # Создаем DataFrame
-    num_features = len(all_data[0]) - 2  # Минус класс и имя файла
-    columns = [f'hog_{i}' for i in range(num_features)] + ['class', 'image_name']
-    df = pd.DataFrame(all_data, columns=columns)
-
-    # Сохраняем в CSV
-    df.to_csv(OUTPUT_CSV, index=False)
-    print(f"Успешно сохранено {len(all_data)} объектов в {OUTPUT_CSV}")
-    print("Пример данных:")
-    print(df.head())
+    df = pd.DataFrame(data, columns=columns)
+    df.to_csv(output_csv, index=False)
+    print(f"Данные сохранены в {output_csv}")
+    print(f"Обработано изображений: {len(data)}")
+    print(f"Размерность признаков: {num_features}")
+    print(f"Пример данных:\n{df.head()}")
 else:
-    print("Нет данных для сохранения")
+    print("Нет данных для сохранения. Проверьте папку cropped_dir.")
