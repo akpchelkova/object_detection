@@ -1,5 +1,6 @@
 import cv2
 import os
+import numpy as np
 import joblib
 from skimage.feature import hog
 
